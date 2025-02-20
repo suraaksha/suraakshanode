@@ -11,8 +11,6 @@ const PORT = process.env.PORT || 2000;
 const cors = require("cors");
 const { exec } = require('child_process');
 const fs = require("fs");
-
-const cors = require('cors');
 app.use(cors({ origin: 'https://suraakshaweb.vercel.app' }));
 app.use(bodyParser.json());
 
