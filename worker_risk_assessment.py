@@ -1,39 +1,20 @@
+from flask import Flask
 import pandas as pd
-import chardet  # Auto-detect encoding
 import numpy as np
-import os
-from tabulate import tabulate  # For better table formatting
-from pymongo import MongoClient  # MongoDB connection
+from pymongo import MongoClient
+from pymongo.errors import BulkWriteError
+from flask_cors import CORS
+ 
 
-# MongoDB connection details
-MONGO_URI = "mongodb+srv://suraaksha1:6fm727LtiPZiYy9I@democluster.1hibj.mongodb.net/suraaksha?retryWrites=true&w=majority" # Change if using a remote DB
-DB_NAME = "suraaksha"  # Replace with your actual DB name
-COLLECTION_NAME = "worker_assignments"
+app = Flask(__name__)
+CORS(app)
 
+MONGO_URI = "mongodb+srv://suraaksha1:6fm727LtiPZiYy9I@democluster.1hibj.mongodb.net/suraaksha?retryWrites=true&w=majority"
+DB_NAME = "suraaksha"
+COLLECTION_WORKFORCES = "workforces"
+COLLECTION_WORKPLACES = "workplaces"
+COLLECTION_ASSIGNMENTS = "worker_assignments"
 
-# Define local file paths
-base_dir = os.path.dirname(os.path.abspath(__file__))  # Get the script's directory
-workers_file = os.path.join(base_dir, "workers.csv")
-workplaces_file = os.path.join(base_dir, "workplaces.csv")
-
-# Detect encoding dynamically
-def detect_encoding(file_path):
-    with open(file_path, "rb") as f:
-        result = chardet.detect(f.read(100000))  # Read first 100KB
-    return result["encoding"]
-
-workers_encoding = detect_encoding(workers_file)
-workplaces_encoding = detect_encoding(workplaces_file)
-
-# Load CSV files with correct separator
-workers = pd.read_csv(workers_file, encoding=workers_encoding, sep=",")
-workplaces = pd.read_csv(workplaces_file, encoding=workplaces_encoding, sep=",")
-
-# Fix column names if tab characters were retained in headers
-workers.columns = workers.columns[0].split(",") if len(workers.columns) == 1 else workers.columns
-workplaces.columns = workplaces.columns[0].split(",") if len(workplaces.columns) == 1 else workplaces.columns
-
-# Define risk assessment function
 def calculate_risk(worker, workplace):
     score = 0
     if worker["Heart Rate (BPM)"] > 100:
@@ -45,13 +26,11 @@ def calculate_risk(worker, workplace):
     if worker["Heart Rate Variability (ms)"] < 50:
         score += workplace["Vibration Exposure (Hz)"] * 2
     if workplace["Hazard Levels"] > 7:
-        score += 50  # High hazard penalty
+        score += 50
     return score
 
-# Define safe work duration calculation
 def calculate_safe_hours(worker, workplace):
-    safe_hours = 8  # Default shift duration
-
+    safe_hours = 8
     if workplace["CO2 Levels (ppm)"] > 400:
         safe_hours -= (workplace["CO2 Levels (ppm)"] - 400) / 100
     if workplace["Ambient Temperature (C)"] > 30:
@@ -60,105 +39,77 @@ def calculate_safe_hours(worker, workplace):
         safe_hours -= (workplace["Elevation (m)"] - 500) / 100 * 0.5
     if workplace["Hazard Levels"] > 5:
         safe_hours -= (workplace["Hazard Levels"] - 5) * 0.5
+    return max(safe_hours, 0)
 
-    return max(safe_hours, 0)  # Ensure hours don't go negative
+@app.route('/')
+def assign_workers():
+    client = MongoClient(MONGO_URI)
+    db = client[DB_NAME]
+    workforces_collection = db[COLLECTION_WORKFORCES]
+    workplaces_collection = db[COLLECTION_WORKPLACES]
+    assignments_collection = db[COLLECTION_ASSIGNMENTS]
 
-# Set a limit on the number of workers per floor
-N = 20  # Maximum workers allowed per floor
-print("Columns in workplaces:", workplaces.columns.tolist())
+    workforces = pd.DataFrame(list(workforces_collection.find({}, {'_id': 0})))
+    workplaces = pd.DataFrame(list(workplaces_collection.find({}, {'_id': 0})))
 
-floor_capacity = {floor: 0 for floor in workplaces["Floor_ID"]}  # Track floor assignments
+    N = 20
+    floor_capacity = {floor: 0 for floor in workplaces["Floor_ID"]}
 
-# Assign workers to best workplace & assess risk
-assignments = []
+    assignments = []
+    workforces["Risk_Score"] = workforces.apply(lambda worker: min(
+        calculate_risk(worker, workplace) for _, workplace in workplaces.iterrows()
+    ), axis=1)
 
-# Sort workers by increasing risk score for optimal allocation
-workers["Risk_Score"] = workers.apply(lambda worker: min(
-    calculate_risk(worker, workplace) for _, workplace in workplaces.iterrows()
-), axis=1)
+    sorted_workers = workforces.sort_values(by="Risk_Score")
 
-sorted_workers = workers.sort_values(by="Risk_Score")  # Lower risk workers get assigned first
+    for _, worker in sorted_workers.iterrows():
+        best_workplace = None
+        best_score = float('inf')
+        safe_hours = 0
 
-for _, worker in sorted_workers.iterrows():
-    best_workplace = None
-    best_score = float('inf')
-    safe_hours = 0
+        for _, workplace in workplaces.iterrows():
+            temp_safe_hours = calculate_safe_hours(worker, workplace)
+            if temp_safe_hours > 0 and floor_capacity[workplace["Floor_ID"]] < N:
+                risk = calculate_risk(worker, workplace)
+                if risk < best_score:
+                    best_score = risk
+                    best_workplace = workplace
+                    safe_hours = temp_safe_hours
 
-    # Find the best available floor that isn't full and has safe work hours > 0
-    for _, workplace in workplaces.iterrows():
-        temp_safe_hours = calculate_safe_hours(worker, workplace)
-        if temp_safe_hours > 0 and floor_capacity[workplace["Floor_ID"]] < N:  # Check capacity & safety
-            risk = calculate_risk(worker, workplace)
-            if risk < best_score:
-                best_score = risk
-                best_workplace = workplace
-                safe_hours = temp_safe_hours
+        if best_workplace is not None:
+            risk_level = "High" if best_score > 120 else "Moderate" if best_score > 80 else "Safe"
+            suggested_move = "No"
+            if risk_level == "High":
+                for _, alternative_wp in workplaces.iterrows():
+                    if alternative_wp["Hazard Levels"] < best_workplace["Hazard Levels"] and calculate_safe_hours(worker, alternative_wp) > 0:
+                        suggested_move = f"Move to {alternative_wp['Floor_ID']}"
+                        break
 
-    if best_workplace is not None:
-        # Determine Risk Level
-        if best_score > 120:
-            risk_level = "High"
-        elif best_score > 80:
-            risk_level = "Moderate"
+            assignments.append({
+                "EMP_CODE": worker["EMP_CODE"],
+                "Assigned_Floor": best_workplace["Floor_ID"],
+                "Safe_Work_Duration_Hours": safe_hours,
+                "Risk_Level": risk_level,
+                "Suggested_Move": suggested_move
+            })
+            floor_capacity[best_workplace["Floor_ID"]] += 1
         else:
-            risk_level = "Safe"
+            assignments.append({
+                "EMP_CODE": worker["EMP_CODE"],
+                "Assigned_Floor": "Unassigned",
+                "Safe_Work_Duration_Hours": 0,
+                "Risk_Level": "No Safe Floor",
+                "Suggested_Move": "Find Alternative"
+            })
 
-        # Suggest moving worker to an easier workplace if risk is high
-        suggested_move = "No"
-        if risk_level == "High":
-            for _, alternative_wp in workplaces.iterrows():
-                if alternative_wp["Hazard Levels"] < best_workplace["Hazard Levels"] and calculate_safe_hours(worker, alternative_wp) > 0:
-                    suggested_move = f"Move to {alternative_wp['Floor_ID']}"
-                    break
+    assignments_collection.delete_many({})
+    try:
+        assignments_collection.insert_many(assignments, ordered=False)
+    except BulkWriteError:
+        pass
 
-        # Assign worker and update floor capacity
-        assignments.append([worker["EMP_CODE"], best_workplace["Floor_ID"], safe_hours, risk_level, suggested_move])
-        floor_capacity[best_workplace["Floor_ID"]] += 1  # Increase count
-    else:
-        # If no safe floor was found, mark as unassigned
-        assignments.append([worker["EMP_CODE"], "Unassigned", 0, "No Safe Floor", "Find Alternative"])
+    return "Worker assignments stored in database."
 
-# Save results to CSV
-output_file = os.path.join(base_dir, "worker_assignments.csv")
-assignments_df = pd.DataFrame(assignments, columns=["EMP_CODE", "Assigned_Floor", "Safe_Work_Duration_Hours", "Risk_Level", "Suggested_Move"])
-assignments_df.to_csv(output_file, index=False)
-
-print(f" Worker assignments saved to: {output_file}")
-
-# Define the saved file path
-output_file = os.path.join(base_dir, "worker_assignments.csv")
-
-# Read the worker assignments CSV
-try:
-    assignments_df = pd.read_csv(output_file)
-
-    # Display the data in table format
-    print("\n Worker Assignments Table:\n")
-    print(tabulate(assignments_df, headers="keys", tablefmt="pretty"))
-
-except FileNotFoundError:
-    print(f"Error: The file '{output_file}' was not found. Ensure the previous script ran successfully.")
-except Exception as e:
-    print(f"An error occurred: {e}")
-
-
-# Connect to MongoDB
-client = MongoClient(MONGO_URI)
-db = client[DB_NAME]
-collection = db[COLLECTION_NAME]
-
-# Ensure EMP_CODE is unique by creating a unique index
-collection.create_index([("EMP_CODE", 1)], unique=True)
-
-# Convert DataFrame to a list of dictionaries
-assignments_data = assignments_df.to_dict(orient="records")
-from pymongo.errors import BulkWriteError
-
-try:
-    collection.insert_many(assignments_data, ordered=False)  # ordered=False allows inserting valid records
-    print(f"Data successfully stored in MongoDB collection: {COLLECTION_NAME}")
-except BulkWriteError as e:
-    print("Duplicate EMP_CODE entries found. Skipping duplicates...")
-
-
-print(f"Data successfully stored in MongoDB collection: {COLLECTION_NAME}")
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)

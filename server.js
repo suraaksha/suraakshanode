@@ -156,48 +156,6 @@ app.post("/api/uploadWorkPlace", async (req, res) => {
 });
 
 
-// Route to trigger Python script
-
-app.get("/api/export-to-csv", (req, res) => {
-  const scriptPath = path.join(__dirname, "ml", "mongo_excel.py");
-
-  exec(`python "${scriptPath}"`, (error, stdout, stderr) => {
-      if (error) {
-          console.error(`Error executing Python script: ${error.message}`);
-          return;
-      }
-      if (stderr) {
-          console.error(`stderr: ${stderr}`);
-          return;
-      }
-      console.log(`stdout: ${stdout}`);
-  });
-});
-
-// ML Model Execution Endpoint
-app.get("/api/run-risk-assessment", (req, res) => {
-  const pythonScript = path.join(__dirname, "ml", "worker_risk_assessment.py");
-  const process = spawn("python", [pythonScript]);
-  let output = "";
-
-  process.stdout.on("data", (data) => {
-    output += data.toString();
-    console.log(`ML Output: ${data}`);
-  });
-
-  process.stderr.on("data", (data) => {
-    console.error(`ML Error: ${data}`);
-  });
-
-  process.on("close", (code) => {
-    if (code === 0) {
-      res.json({ message: "ML script executed successfully!", output });
-    } else {
-      res.status(500).json({ error: "ML script execution failed!" });
-    }
-  });
-});
-
 const EmployeeSchema = new mongoose.Schema({
   personalDetails: {
     name: String,
@@ -234,9 +192,9 @@ const EmployeeSchema = new mongoose.Schema({
 })
 
   
-const  Employee= mongoose.model("Employee", EmployeeSchema, "DetailsOFEmployee");
-/*
- fs.readFile("workers_data (2).json", "utf8", (err, data) => {
+const  Employee= mongoose.model("Employee", EmployeeSchema, "DetailsOfEmployee");
+
+/* fs.readFile("workers_data (2).json", "utf8", (err, data) => {
   if (err) {
     console.error("Error reading JSON file:", err);
     return;
@@ -249,8 +207,7 @@ const  Employee= mongoose.model("Employee", EmployeeSchema, "DetailsOFEmployee")
       mongoose.connection.close();
     })
     .catch((err) => console.error("Error inserting data:", err));
-});   
- */
+});*/
 
 app.get("/api/emp", async (req, res) => {
   try {
