@@ -12,7 +12,8 @@ const cors = require("cors");
 const { exec } = require('child_process');
 const fs = require("fs");
 
-app.use(cors());
+const cors = require('cors');
+app.use(cors({ origin: 'https://suraakshaweb.vercel.app' }));
 app.use(bodyParser.json());
 
 // MongoDB Connection
