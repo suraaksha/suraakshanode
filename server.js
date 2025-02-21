@@ -208,14 +208,16 @@ const  Employee= mongoose.model("Employee", EmployeeSchema, "DetailsOfEmployee")
     .catch((err) => console.error("Error inserting data:", err));
 });*/
 
+// Get all employees sorted by employeeId
 app.get("/api/emp", async (req, res) => {
   try {
-    const employees = await Employee.find({}); // Fetch all fields
+    const employees = await Employee.find({}).sort({ "personalDetails.employeeId": 1 }); // Sorting by nested field
     res.json(employees);
   } catch (error) {
     res.status(500).json({ message: "Error fetching workers", error });
   }
 });
+
 
 
 app.get("/api/emp/:id", async (req, res) => {
